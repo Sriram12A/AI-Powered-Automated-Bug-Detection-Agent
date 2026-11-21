@@ -39,3 +39,4 @@ def calculate_average(numbers: List[float]) -> float:
     count = len(numbers)
     # VULNERABILITY 3: Division by zero when list is empty
     return total / count
+
