@@ -1,253 +1,286 @@
-"""Autonomous Agentic Bug Detection and Verification Engine."""
+"""
+AI-Powered Automated Bug Detection & Verification Agent
+======================================================
+An autonomous agent that:
+1. Analyzes code and diffs for defects and vulnerabilities.
+2. Synthesizes targeted Pytest test cases to reproduce the bug.
+3. Executes the test in an isolated, sandboxed temporary environment.
+4. Generates and empirically verifies a code patch by re-running tests.
+"""
 
 import os
+import re
+import sys
+import json
 import time
 import uuid
-import logging
-from typing import Dict, Any, List, Optional, Callable
-from pathlib import Path
+import tempfile
+import subprocess
+from typing import Dict, List, Any, Optional
+from dotenv import load_dotenv
 
-from config import config
-from database import db
-from git_analyzer import GitAnalyzer
-from ai_reviewer import AIReviewer
-from test_generator import TestGenerator
-from test_executor import TestExecutor
-from report_generator import report_generator
-from github_integration import GitHubIntegration
-from llm_provider import get_llm_provider
-
-logger = logging.getLogger(__name__)
+load_dotenv()
 
 
 class BugDetectionAgent:
-    """
-    Autonomous multi-stage agentic workflow:
-    1. Shadow Workspace Setup -> 2. Git Diff Extraction -> 3. AI Code Review ->
-    4. Pytest Generation -> 5. Sandboxed Test Execution -> 6. Fix Verification ->
-    7. Metrics & Report Generation.
-    """
+    """Autonomous agent for bug detection, reproduction test generation, and fix verification."""
 
-    def __init__(
-        self,
-        llm_provider_name: Optional[str] = None,
-        shadow_mode: bool = True,
-        auto_verify: bool = True,
-        on_progress: Optional[Callable[[str, str], None]] = None
-    ):
-        self.provider_name = llm_provider_name or config.LLM_PROVIDER
-        self.llm_provider = get_llm_provider(self.provider_name)
-        self.shadow_mode = shadow_mode
-        self.auto_verify = auto_verify
-        self.on_progress = on_progress or (lambda phase, msg: None)
+    def __init__(self, provider: str = "mock", api_key: Optional[str] = None):
+        self.provider = provider.lower()
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-        self.reviewer = AIReviewer(self.llm_provider)
-        self.test_generator = TestGenerator(self.llm_provider)
-        self.test_executor = TestExecutor()
-        self.github = GitHubIntegration()
+    def analyze_code(self, source_code: str, file_name: str = "main.py") -> List[Dict[str, Any]]:
+        """Analyze source code or diff to detect potential bugs and security vulnerabilities."""
+        # 1. If Gemini provider requested and API key is present
+        if self.provider == "gemini" and os.getenv("GEMINI_API_KEY"):
+            try:
+                from google import genai
+                client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+                prompt = f"""You are an expert software engineer and security auditor.
+Analyze the following Python code for bugs, security vulnerabilities (e.g., SQL injection), logic errors, and boundary issues.
 
-    def _notify(self, run_id: str, phase: str, message: str, level: str = "INFO"):
-        """Emit telemetry to database, console logger, and user UI callback."""
-        logger.info("[%s] [%s] %s", run_id, phase, message)
-        db.log(run_id, phase, level, message)
-        self.on_progress(phase, message)
+File: {file_name}
+```python
+{source_code}
+```
 
-    def run(
-        self,
-        repo_path: str,
-        commit_hash: Optional[str] = None,
-        sync_github_issues: bool = False,
-        github_repo: Optional[str] = None
-    ) -> Dict[str, Any]:
+Return ONLY a valid JSON array of objects with this schema:
+[
+  {{
+    "title": "Short title of bug",
+    "category": "SECURITY | LOGICAL_ERROR | BOUNDARY_CONDITION | RESOURCE_LEAK",
+    "severity": "CRITICAL | HIGH | MEDIUM | LOW",
+    "confidence": "HIGH | MEDIUM | LOW",
+    "line_number": 1,
+    "description": "Explanation of the defect",
+    "code_snippet": "faulty line of code",
+    "suggested_fix": "corrected replacement code"
+  }}
+]
+Do not include any markdown or text outside the JSON array.
+"""
+                resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+                clean_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", resp.text.strip(), flags=re.MULTILINE)
+                return json.loads(clean_json)
+            except Exception as e:
+                print(f"[Warning] Gemini API review fallback to offline heuristic: {e}")
+
+        # 2. Offline / Mock deterministic defect detection (Fast, reliable, zero-cost)
+        return self._detect_heuristics(source_code, file_name)
+
+    def _detect_heuristics(self, code: str, file_name: str) -> List[Dict[str, Any]]:
+        """Intelligent offline rule-engine detecting canonical defects."""
+        issues = []
+        lines = code.splitlines()
+
+        # Check 1: SQL Injection via f-strings
+        sql_match = re.search(r'query\s*=\s*f["\']SELECT.*?\{(\w+)\}.*?["\']\s*\n\s*cursor\.execute\(query\)', code, re.DOTALL | re.IGNORECASE)
+        if not sql_match:
+            sql_match = re.search(r'(execute|cursor\.execute)\s*\(\s*f["\']SELECT.*?\{(\w+)\}', code, re.IGNORECASE)
+        if sql_match:
+            line_no = code[:sql_match.start()].count("\n") + 1
+            issues.append({
+                "id": f"iss_{uuid.uuid4().hex[:6]}",
+                "title": "SQL Injection via Unsanitized F-String",
+                "category": "SECURITY",
+                "severity": "CRITICAL",
+                "confidence": "HIGH",
+                "line_number": line_no,
+                "description": "User input is formatted directly into a SQL query string, allowing arbitrary SQL execution.",
+                "code_snippet": sql_match.group(0),
+                "suggested_fix": 'cursor.execute("SELECT * FROM users WHERE username = ?", (username,))'
+            })
+
+        # Check 2: Off-by-one boundary defect in range(len + 1)
+        off_by_one = re.search(r'for\s+\w+\s+in\s+range\s*\(\s*len\s*\(\s*(\w+)\s*\)\s*\+\s*1\s*\)', code)
+        if off_by_one:
+            line_no = code[:off_by_one.start()].count("\n") + 1
+            raw_line = lines[line_no - 1] if line_no <= len(lines) else off_by_one.group(0)
+            indent = re.match(r"^\s*", raw_line).group(0)
+            var_name = off_by_one.group(1)
+            issues.append({
+                "id": f"iss_{uuid.uuid4().hex[:6]}",
+                "title": "IndexError: Off-by-One Loop Range Defect",
+                "category": "BOUNDARY_CONDITION",
+                "severity": "HIGH",
+                "confidence": "HIGH",
+                "line_number": line_no,
+                "description": f"Iterating over range(len({var_name}) + 1) attempts to access an index beyond array bounds.",
+                "code_snippet": raw_line,
+                "suggested_fix": f"{indent}for i in range(len({var_name})):"
+            })
+
+        # Check 3: Unhandled ZeroDivisionError (e.g., total / count)
+        div_zero = re.search(r'(\w+)\s*/\s*(\w+)', code)
+        if div_zero and ("count" in code.lower() or "len" in code.lower() or "average" in code.lower()):
+            num_var = div_zero.group(1)
+            denom = div_zero.group(2)
+            if f"if {denom} == 0" not in code and f"if not {denom}" not in code:
+                line_no = code[:div_zero.start()].count("\n") + 1
+                raw_line = lines[line_no - 1] if line_no <= len(lines) else div_zero.group(0)
+                indent = re.match(r"^\s*", raw_line).group(0)
+                issues.append({
+                    "id": f"iss_{uuid.uuid4().hex[:6]}",
+                    "title": "Unhandled ZeroDivisionError in Arithmetic",
+                    "category": "LOGICAL_ERROR",
+                    "severity": "MEDIUM",
+                    "confidence": "HIGH",
+                    "line_number": line_no,
+                    "description": f"Denominator `{denom}` is used in division without verifying it is non-empty/non-zero.",
+                    "code_snippet": raw_line,
+                    "suggested_fix": f"{indent}return {num_var} / {denom} if {denom} != 0 else 0.0"
+                })
+
+        return issues
+
+    def generate_reproduction_test(self, file_name: str, issue: Dict[str, Any]) -> str:
+        """Synthesize a self-contained Pytest script that fails on the bug and passes when fixed."""
+        module_name = file_name.replace(".py", "")
+        title = issue.get("title", "")
+
+        if "SQL" in title:
+            return f"""import pytest
+from {module_name} import execute_user_query
+
+def test_sql_injection():
+    # Attempt SQL payload injection; a secure parameterized query will find 0 rows
+    malicious_payload = "admin' OR '1'='1"
+    rows = execute_user_query(malicious_payload)
+    assert len(rows) == 0, "Vulnerability Confirmed: SQL Injection payload returned unauthorized records!"
+"""
+        elif "IndexError" in title or "Off-by-One" in title:
+            return f"""import pytest
+from {module_name} import process_items
+
+def test_off_by_one_boundary():
+    # Pass 3 items; buggy function iterates 4 times and raises IndexError on item 4
+    items = ["alpha", "beta", "gamma"]
+    result = process_items(items)
+    assert len(result) == 3, "Expected 3 processed items without IndexError"
+"""
+        elif "ZeroDivision" in title:
+            return f"""import pytest
+from {module_name} import calculate_average
+
+def test_zero_division():
+    # Empty list must return 0.0 without raising ZeroDivisionError
+    result = calculate_average([])
+    assert result == 0.0, "Average of empty list should safely return 0.0"
+"""
+        else:
+            return f"""import pytest
+import {module_name}
+
+def test_module_execution():
+    assert {module_name} is not None
+"""
+
+    def execute_test_in_sandbox(self, source_code: str, test_code: str, file_name: str = "main.py") -> Dict[str, Any]:
         """
-        Execute the complete autonomous bug detection, reproduction, and verification pipeline.
-
-        Args:
-            repo_path: Path to target git repository.
-            commit_hash: Specific commit hash to inspect (or latest changes if None).
-            sync_github_issues: Whether to create GitHub issues for confirmed bugs.
-            github_repo: Target GitHub repo formatted as "owner/repo".
-
-        Returns:
-            Dictionary containing run summary, detected issues, test telemetry, and metrics.
+        Execute Pytest inside an isolated temporary directory.
+        Never executes untrusted code on the host directory.
         """
-        start_time = time.time()
-        run_id = f"run_{uuid.uuid4().hex[:8]}"
+        with tempfile.TemporaryDirectory(prefix="agent_sandbox_") as tmp_dir:
+            src_file = os.path.join(tmp_dir, file_name)
+            test_file = os.path.join(tmp_dir, "test_reproduce.py")
 
-        # Phase 1: Shadow Workspace Resolution
-        self._notify(run_id, "INIT", f"Initializing Agentic Bug Detection run {run_id}")
-        git_analyzer = None
+            with open(src_file, "w", encoding="utf-8") as f:
+                f.write(source_code)
+            with open(test_file, "w", encoding="utf-8") as f:
+                f.write(test_code)
 
-        try:
-            git_analyzer = GitAnalyzer(repo_path, shadow_mode=self.shadow_mode, run_id=run_id)
-            repo_info = git_analyzer.get_repo_info()
-            target_commit = commit_hash or repo_info.get("commit_hash", "HEAD")
+            # Strip host secrets from environment
+            clean_env = os.environ.copy()
+            for key in ["GEMINI_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"]:
+                clean_env.pop(key, None)
+            clean_env["PYTHONPATH"] = tmp_dir
 
-            db.create_run(
-                run_id=run_id,
-                repo_name=repo_info.get("repo_name", "unknown_repo"),
-                repo_path=str(repo_path),
-                commit_hash=target_commit,
-                branch_name=repo_info.get("branch", "main"),
-                shadow_mode=self.shadow_mode
-            )
-
-            # Phase 2: Git Diff Analysis
-            self._notify(run_id, "DIFF_ANALYSIS", f"Analyzing code changes for commit: {target_commit[:8] if target_commit else 'HEAD'}")
-            changed_files = git_analyzer.analyze_commit_diff(commit_hash)
-
-            if not changed_files:
-                self._notify(run_id, "DIFF_ANALYSIS", "No Python code changes detected in target commit/workspace.")
-                db.update_run(
-                    run_id,
-                    status="COMPLETED",
-                    summary="No Python changes detected.",
-                    execution_time_sec=round(time.time() - start_time, 2)
+            start_t = time.time()
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "pytest", "test_reproduce.py", "-v", "--tb=short"],
+                    cwd=tmp_dir,
+                    env=clean_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
                 )
-                return {"run_id": run_id, "status": "COMPLETED", "issues": [], "tests": []}
-
-            self._notify(run_id, "DIFF_ANALYSIS", f"Extracted {len(changed_files)} modified Python file(s).")
-
-            # Phase 3: AI Code Review & Defect Identification
-            all_detected_issues: List[Dict[str, Any]] = []
-            source_file_cache: Dict[str, str] = {}
-
-            for file_data in changed_files:
-                rel_path = file_data["file_path"]
-                diff_text = file_data["diff_text"]
-                full_code = file_data["full_content"]
-                source_file_cache[rel_path] = full_code
-
-                self._notify(run_id, "AI_REVIEW", f"Conducting semantic AI code review on: {rel_path}")
-                issues = self.reviewer.review_file_changes(rel_path, diff_text, full_code, run_id)
-
-                for issue in issues:
-                    db.add_issue(issue)
-                    all_detected_issues.append(issue)
-
-            self._notify(run_id, "AI_REVIEW", f"Identified {len(all_detected_issues)} potential defect(s).")
-
-            # Phase 4 & 5: Automated Test Generation & Sandboxed Execution
-            executed_tests: List[Dict[str, Any]] = []
-            confirmed_bug_count = 0
-            fixed_bug_count = 0
-
-            for issue in all_detected_issues:
-                rel_path = issue["file_path"]
-                full_code = source_file_cache.get(rel_path, "")
-
-                self._notify(run_id, "TEST_GEN", f"Synthesizing reproduction Pytest for: {issue['title']}")
-                test_meta = self.test_generator.generate_reproduction_test(rel_path, issue, full_code, run_id)
-
-                # Execute in isolated sandbox against the buggy code
-                self._notify(run_id, "TEST_EXEC", f"Running sandboxed test: {test_meta['file_path']}")
-                exec_result = self.test_executor.run_test_in_sandbox(
-                    source_files=source_file_cache,
-                    test_file_name=test_meta["file_path"],
-                    test_code=test_meta["test_code"]
-                )
-
-                test_record = {
-                    **test_meta,
-                    **exec_result
+                duration = round(time.time() - start_t, 2)
+                status = "PASSED" if proc.returncode == 0 else "FAILED"
+                return {
+                    "status": status,
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                    "duration_sec": duration
                 }
-                db.add_test(test_record)
-                executed_tests.append(test_record)
+            except subprocess.TimeoutExpired:
+                return {
+                    "status": "TIMEOUT",
+                    "stdout": "",
+                    "stderr": "Execution timed out exceeding 10s limit.",
+                    "duration_sec": 10.0
+                }
 
-                # Evaluate execution feedback:
-                # If test FAILED or threw expected AssertionError/Exception, bug is CONFIRMED!
-                if exec_result["execution_status"] in ("FAILED", "ERROR"):
-                    issue["status"] = "CONFIRMED"
-                    confirmed_bug_count += 1
-                    db.update_issue_status(issue["id"], "CONFIRMED")
-                    self._notify(run_id, "VERIFICATION", f"Bug CONFIRMED via test reproduction: {issue['title']}")
+    def verify_fix(self, source_code: str, issue: Dict[str, Any], test_code: str, file_name: str = "main.py") -> Dict[str, Any]:
+        """Apply the suggested fix and re-run the reproduction test to verify it passes."""
+        faulty = issue.get("code_snippet", "")
+        fix = issue.get("suggested_fix", "")
 
-                    # Phase 6: Autonomous Fix & Verification Loop
-                    if self.auto_verify:
-                        self._notify(run_id, "FIX_VERIFY", f"Attempting autonomous patch & re-verification for: {issue['title']}")
-                        fix_data = self.reviewer.generate_fix(rel_path, issue, full_code)
-                        patched_source = fix_data.get("full_fixed_file", full_code)
+        patched_code = source_code.replace(faulty, fix) if faulty and faulty in source_code else source_code
 
-                        # Re-run the same reproduction test against the patched source
-                        patched_sources = {**source_file_cache, rel_path: patched_source}
-                        verify_exec = self.test_executor.run_test_in_sandbox(
-                            source_files=patched_sources,
-                            test_file_name=f"verify_{test_meta['file_path']}",
-                            test_code=test_meta["test_code"]
-                        )
+        res = self.execute_test_in_sandbox(patched_code, test_code, file_name)
+        is_fixed = (res["status"] == "PASSED")
 
-                        if verify_exec["execution_status"] == "PASSED":
-                            issue["status"] = "FIXED"
-                            fixed_bug_count += 1
-                            db.update_issue_status(issue["id"], "FIXED")
-                            self._notify(run_id, "FIX_VERIFY", f"Fix VERIFIED! Test passed on patched code.")
-                        else:
-                            self._notify(run_id, "FIX_VERIFY", "Patch did not fully resolve test failure; flagged for manual review.")
+        return {
+            "verified": is_fixed,
+            "patched_code": patched_code,
+            "verification_status": "FIXED" if is_fixed else "FAILED_VERIFICATION",
+            "test_output": res["stdout"]
+        }
 
-                else:
-                    # Test passed unexpectedly or couldn't trigger failure
-                    issue["status"] = "SUSPECTED"
-                    db.update_issue_status(issue["id"], "SUSPECTED")
-                    self._notify(run_id, "VERIFICATION", f"Defect not reproduced by test harness (marked SUSPECTED): {issue['title']}")
+    def run_pipeline(self, source_code: str, file_name: str = "main.py") -> Dict[str, Any]:
+        """Execute the complete agentic pipeline on the target source code."""
+        start_time = time.time()
 
-            # Phase 7: Optional GitHub Issue Synchronization
-            if sync_github_issues and github_repo and "/" in github_repo:
-                owner, repo = github_repo.split("/", 1)
-                for issue in all_detected_issues:
-                    if issue["status"] in ("CONFIRMED", "FIXED"):
-                        res = self.github.create_github_issue(owner, repo, issue, dry_run=not self.github.is_authenticated())
-                        if res.get("issue_url"):
-                            db.update_issue_status(issue["id"], issue["status"], res.get("issue_url"))
+        # Step 1: Detect bugs
+        issues = self.analyze_code(source_code, file_name)
 
-            # Phase 8: Metrics, Finalization & Reporting
-            total_duration = round(time.time() - start_time, 2)
-            passed_tests_count = sum(1 for t in executed_tests if t.get("execution_status") == "PASSED")
-            test_pass_rate = round((passed_tests_count / len(executed_tests) * 100.0), 1) if executed_tests else 0.0
+        results = []
+        confirmed_count = 0
+        fixed_count = 0
 
-            # False positive approximation: suspected issues that couldn't be confirmed
-            suspected_count = sum(1 for i in all_detected_issues if i["status"] == "SUSPECTED")
-            fp_rate = round((suspected_count / len(all_detected_issues) * 100.0), 1) if all_detected_issues else 0.0
+        # Step 2-4: For each issue, generate test, run in sandbox, and verify fix
+        for issue in issues:
+            test_code = self.generate_reproduction_test(file_name, issue)
+            test_res = self.execute_test_in_sandbox(source_code, test_code, file_name)
 
-            db.update_run(
-                run_id,
-                status="COMPLETED",
-                total_bugs=len(all_detected_issues),
-                confirmed_bugs=confirmed_bug_count,
-                test_pass_rate=test_pass_rate,
-                execution_time_sec=total_duration,
-                false_positive_rate=fp_rate,
-                summary=f"Detected {len(all_detected_issues)} issues ({confirmed_bug_count} confirmed, {fixed_bug_count} verified fixes)."
-            )
+            # If test failed on buggy code, bug is CONFIRMED
+            bug_confirmed = (test_res["status"] == "FAILED")
+            if bug_confirmed:
+                confirmed_count += 1
+                issue["status"] = "CONFIRMED"
+            else:
+                issue["status"] = "SUSPECTED"
 
-            # Generate exportable reports
-            report_paths = report_generator.generate_all(run_id)
-            self._notify(run_id, "COMPLETE", f"Analysis complete in {total_duration}s. Reports generated.")
+            # Step 5: Verify fix
+            verification = self.verify_fix(source_code, issue, test_code, file_name)
+            if verification["verified"]:
+                fixed_count += 1
+                issue["status"] = "FIXED"
 
-            return {
-                "run_id": run_id,
-                "status": "COMPLETED",
-                "repo_info": repo_info,
-                "total_bugs": len(all_detected_issues),
-                "confirmed_bugs": confirmed_bug_count,
-                "fixed_bugs": fixed_bug_count,
-                "test_pass_rate": test_pass_rate,
-                "false_positive_rate": fp_rate,
-                "execution_time_sec": total_duration,
-                "issues": all_detected_issues,
-                "tests": executed_tests,
-                "reports": report_paths
-            }
+            results.append({
+                "issue": issue,
+                "test_code": test_code,
+                "initial_test_status": test_res["status"],
+                "verification": verification
+            })
 
-        except Exception as e:
-            logger.error("Agent execution failed on run %s: %s", run_id, e, exc_info=True)
-            db.update_run(run_id, status="FAILED", summary=str(e))
-            self._notify(run_id, "ERROR", f"Agent run failed: {e}", level="ERROR")
-            return {
-                "run_id": run_id,
-                "status": "FAILED",
-                "error": str(e)
-            }
-        finally:
-            if git_analyzer:
-                git_analyzer.cleanup()
+        total_time = round(time.time() - start_time, 2)
 
+        return {
+            "total_bugs": len(issues),
+            "confirmed_bugs": confirmed_count,
+            "fixed_bugs": fixed_count,
+            "duration_sec": total_time,
+            "results": results
+        }
