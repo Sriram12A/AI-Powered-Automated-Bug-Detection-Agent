@@ -1,0 +1,22 @@
+# Core Agentic AI Framework & LLM APIs
+google-genai>=2.9.0
+openai>=2.30.0
+python-dotenv>=1.0.0
+pydantic>=2.10.0
+
+# Git Analysis & Repository Integration
+GitPython>=3.1.40
+requests>=2.31.0
+
+# Isolated Sandbox & Automated Testing
+pytest>=8.0.0
+
+# Storage & Data Telemetry
+pandas>=2.2.0
+
+# Web Dashboards & REST Endpoints
+streamlit>=1.35.0
+fastapi>=0.110.0
+uvicorn>=0.30.0
+altair>=5.3.0
+

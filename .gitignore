@@ -1,0 +1,74 @@
+# ==============================================================================
+# Git Ignore - Argus-AI Bug Detection Agent
+# ==============================================================================
+
+# Environment and Secrets (CRITICAL: Never commit real API keys or tokens)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Local SQLite Databases
+*.db
+*.sqlite
+*.sqlite3
+bug_detector.db
+
+# Ephemeral Shadow Workspaces
+.shadow_workspace/
+.shadow_workspace/*
+
+# Python Bytecode and Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Pytest and Test Caches
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Generated Runtime Reports (Keep directory structure via .gitkeep)
+reports/*
+!reports/.gitkeep
+
+# Nested Sample Repo Git Metadata (Prevents Git from treating it as a submodule)
+sample_repos/vulnerable_app/.git/
+
+# Streamlit Caches
+.streamlit/
+
+# OS and Editor Specific Files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
